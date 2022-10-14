@@ -72,16 +72,21 @@ public class OkHttpClientImpl implements HttpClient {
       // consume should not block from a callers perspective
       try {
         httpClient.dispatcher().executorService().execute(() -> {
-          try {
-            if (!source.exhausted() && !done.isDone()) {
-              T value = process(source);
-              consumer.consume(value, this);
-            } else {
-              done.complete(null);
+          // we must serialize multiple consumes as source is not thread-safe
+          // it would be better to use SerialExecutor, but that would need to move modules, as to
+          // potentially not hold multiple executor threads
+          synchronized (source) {
+            try {
+              if (!source.exhausted() && !done.isDone()) {
+                T value = process(source);
+                consumer.consume(value, this);
+              } else {
+                done.complete(null);
+              }
+            } catch (Exception e) {
+              Utils.closeQuietly(source);
+              done.completeExceptionally(e);
             }
-          } catch (Exception e) {
-            Utils.closeQuietly(source);
-            done.completeExceptionally(e);
           }
         });
       } catch (Exception e) {
@@ -247,30 +252,6 @@ public class OkHttpClientImpl implements HttpClient {
         AsyncBody asyncBody = handler.apply(source);
 
         future.complete(new OkHttpResponseImpl<>(response, asyncBody));
-      }
-
-      @Override
-      public void onFailure(Call call, IOException e) {
-        future.completeExceptionally(e);
-      }
-    });
-    future.whenComplete((r, t) -> {
-      if (future.isCancelled()) {
-        call.cancel();
-      }
-    });
-    return future;
-  }
-
-  @Override
-  public <T> CompletableFuture<HttpResponse<T>> sendAsync(HttpRequest request, Class<T> type) {
-    CompletableFuture<HttpResponse<T>> future = new CompletableFuture<>();
-    Call call = httpClient.newCall(((OkHttpRequestImpl) request).getRequest());
-    call.enqueue(new Callback() {
-
-      @Override
-      public void onResponse(Call call, Response response) throws IOException {
-        future.complete(new OkHttpResponseImpl<>(response, type));
       }
 
       @Override
